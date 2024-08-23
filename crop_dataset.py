@@ -64,7 +64,9 @@ class RandomCropComputer(Dataset):
             image_set=img_set,
             transform=T.ToTensor(),
             target_transform=ToTargetTensor(),
-            extra_transform=crop_func
+            extra_transform=crop_func,
+
+            ignore_labels=args.ignore_labels,
         )
         
     def __getitem__(self, item):
@@ -83,30 +85,43 @@ def my_app():
     parser.add_argument('--num_workers', default=int(os.cpu_count() / 8), type=int)
 
     # dataset and baseline
-    parser.add_argument('--data_dir', default='/mnt/hard2/lbk-iccv/datasets', type=str)
-    parser.add_argument('--dataset', default='cocostuff27', type=str)
-    parser.add_argument('--gpu', default=1, type=int)
+    # parser.add_argument('--data_dir', default='/mnt/hard2/lbk-iccv/datasets', type=str)
+    parser.add_argument(
+        '--data_dir', default='/root/Causal-Unsupervised-Segmentation/dataset/', type=str)
+    parser.add_argument('--dataset', default='roseaid', type=str)
+    parser.add_argument('--gpu', default=0, type=int)
     parser.add_argument('--distributed', default='false', type=str2bool)
     parser.add_argument('--crop_type', default='five', type=str)
     parser.add_argument('--crop_ratio', default=0.5, type=float)
+
+    parser.add_argument('--ignore_labels', default=True)
 
     args = parser.parse_args()
     
     # setting gpu id of this process
     torch.cuda.set_device(args.gpu)
 
+
     counter = 0
     dataset = RandomCropComputer(args, args.dataset, "train", args.crop_type, args.crop_ratio)
     loader = DataLoader(dataset, 1, shuffle=False, num_workers=args.num_workers, collate_fn=lambda l: l)
     for batch in tqdm(loader):
-        imgs = batch[0]['img']
-        labels = batch[0]['label']
-        for img, label in zip(imgs, labels):
-            img_arr = img.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
-            label_arr = (label + 1).unsqueeze(0).permute(1, 2, 0).to('cpu', torch.uint8).numpy().squeeze(-1)
-            Image.fromarray(img_arr).save(join(dataset.img_dir, "{}.jpg".format(counter)), 'JPEG')
-            Image.fromarray(label_arr).save(join(dataset.label_dir, "{}.png".format(counter)), 'PNG')
-            counter+=1
+
+        if args.ignore_labels:
+            imgs = batch[0]['img']
+            for img in imgs:
+                img_arr = img.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
+                Image.fromarray(img_arr).save(join(dataset.img_dir, "{}.jpg".format(counter)), 'JPEG')
+                counter += 1
+        else:
+            imgs = batch[0]['img']
+            labels = batch[0]['label']
+            for img, label in zip(imgs, labels):
+                img_arr = img.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to('cpu', torch.uint8).numpy()
+                label_arr = (label + 1).unsqueeze(0).permute(1, 2, 0).to('cpu', torch.uint8).numpy().squeeze(-1)
+                Image.fromarray(img_arr).save(join(dataset.img_dir, "{}.jpg".format(counter)), 'JPEG')
+                Image.fromarray(label_arr).save(join(dataset.label_dir, "{}.png".format(counter)), 'PNG')
+                counter+=1
 
 if __name__ == "__main__":
     my_app()

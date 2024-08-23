@@ -31,6 +31,9 @@ def dataloader(args, no_ddp_train_shuffle=True):
     elif args.dataset == "coco171":
         args.n_classes = 171
         get_transform = get_cococity_transform
+    elif args.dataset == "roseaid":
+        args.n_classes = 20
+        get_transform = get_cococity_transform
 
     # train dataset
     train_dataset = ContrastiveSegDataset(
@@ -40,6 +43,7 @@ def dataloader(args, no_ddp_train_shuffle=True):
         image_set="train",
         transform=get_transform(args.train_resolution, False),
         target_transform=get_transform(args.train_resolution, True),
+        ignore_labels=args.ignore_labels,
     )
 
     if args.distributed: train_sampler = DistributedSampler(train_dataset, shuffle=True)
@@ -149,6 +153,54 @@ class Coco81(Dataset):
     def __len__(self):
         return len(self.image_files)
 
+from pathlib import Path
+
+class RoseaidDataset(Dataset):
+    def __init__(self, root, image_set, transform, target_transform):
+        super().__init__()
+        self.split = image_set
+        self.root = join(root, "roseaid")
+        self.transform = transform
+        self.label_transform = target_transform
+
+      
+
+        assert self.split in ["train", "val", "train+val"]
+        split_dirs = {
+            "train": ["train"],
+            "val": ["val"],
+            "train+val": ["train", "val"]
+        }
+
+        self.image_files = []
+        self.label_files = []
+
+        image_folder = Path(self.root) / self.split
+        self.image_files = [str(f) for f in list(image_folder.glob('*')) if f.suffix.lower() in ['.jpg', '.jpeg', '.png']]
+    
+        # self.image_files = [f for f in os.listdir(join(self.root,self.split)) if f.endswith(('.jpg', '.jpeg', '.png'))]
+
+
+    def __getitem__(self, index):
+        image_path = self.image_files[index]
+        label_path = None  # self.label_files[index]
+        seed = np.random.randint(2147483647)
+        random.seed(seed)
+        torch.manual_seed(seed)
+        img = self.transform(Image.open(image_path).convert("RGB"))
+
+        # random.seed(seed)
+        # torch.manual_seed(seed)
+        # label = self.label_transform(Image.open(label_path)).squeeze(0)
+        # label[label == 255] = -1  # to be consistent with 10k
+        # coarse_label = torch.zeros_like(label)
+        # for fine, coarse in self.fine_to_coarse.items():
+        #     coarse_label[label == fine] = coarse
+        # coarse_label[label == -1] = -1
+        return img, None, True
+
+    def __len__(self):
+        return len(self.image_files)
 
 class Coco171(Dataset):
     def __init__(self, root, image_set, transform, target_transform):
@@ -506,7 +558,7 @@ class CityscapesSeg(Dataset):
 
 
 class CroppedDataset(Dataset):
-    def __init__(self, root, dataset_name, crop_type, crop_ratio, image_set, transform, target_transform):
+    def __init__(self, root, dataset_name, crop_type, crop_ratio, image_set, transform, target_transform, ignore_labels = True):
         super(CroppedDataset, self).__init__()
         self.dataset_name = dataset_name
         self.split = image_set
@@ -519,25 +571,34 @@ class CroppedDataset(Dataset):
         self.transform = transform
         self.target_transform = target_transform
         self.img_dir = join(self.root, "img", self.split)
-        self.label_dir = join(self.root, "label", self.split)
+
         self.num_images = len(os.listdir(self.img_dir))
-        assert self.num_images == len(os.listdir(self.label_dir))
+
+        self.ignore_labels = ignore_labels
+        if not ignore_labels:
+            self.label_dir = join(self.root, "label", self.split)
+            assert self.num_images == len(os.listdir(self.label_dir))
 
     def __getitem__(self, index):
         image = Image.open(join(self.img_dir, "{}.jpg".format(index))).convert('RGB')
-        target = Image.open(join(self.label_dir, "{}.png".format(index)))
 
         seed = np.random.randint(2147483647)
         random.seed(seed)
         torch.manual_seed(seed)
         image = self.transform(image)
-        random.seed(seed)
-        torch.manual_seed(seed)
-        target = self.target_transform(target)
 
-        target = target - 1
-        mask = target == -1
-        return image, target.squeeze(0), mask
+        if not self.ignore_labels:
+            target = Image.open(join(self.label_dir, "{}.png".format(index)))
+
+            random.seed(seed)
+            torch.manual_seed(seed)
+            target = self.target_transform(target)
+
+            target = target - 1
+            mask = target == -1
+            return image, target.squeeze(0), mask
+        else:
+            return image, None, None
 
     def __len__(self):
         return self.num_images
@@ -579,13 +640,14 @@ class ContrastiveSegDataset(Dataset):
                  transform,
                  target_transform,
                  extra_transform=None,
+                 ignore_labels=False,
                  ):
         super(ContrastiveSegDataset).__init__()
         self.image_set = image_set
         self.dataset_name = dataset_name
         self.extra_transform = extra_transform
         self.normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-
+        self.ignore_labels = ignore_labels
 
         # cityscapes, cocostuff27 
         if  dataset_name == "cityscapes" and crop_type is None:
@@ -627,6 +689,13 @@ class ContrastiveSegDataset(Dataset):
         elif dataset_name == "pascalvoc" and crop_type is not None:
             dataset_class = CroppedDataset
             extra_args = dict(dataset_name="pascalvoc", crop_type='super', crop_ratio=0)
+            
+        elif dataset_name == "roseaid" and crop_type is not None:
+            dataset_class = CroppedDataset
+            extra_args = dict(dataset_name="roseaid", crop_type='five', crop_ratio=0.5)
+        elif dataset_name == "roseaid":
+            dataset_class = RoseaidDataset
+            extra_args = dict()
         else:
             raise ValueError("Unknown dataset: {}".format(dataset_name))
 
@@ -654,11 +723,18 @@ class ContrastiveSegDataset(Dataset):
         else:
             extra_trans = lambda x: x
 
-        ret = {
-            "ind": ind,
-            "img": self.normalize(extra_trans(pack[0])),
-            "label": extra_trans(pack[1]),
-        }
+        if self.ignore_labels:
+            ret = {
+                "ind": ind,
+                "img": self.normalize(extra_trans(pack[0])),
+                # "label": extra_trans(pack[1]),
+            }
+        else:
+            ret = {
+                "ind": ind,
+                "img": self.normalize(extra_trans(pack[0])),
+                "label": extra_trans(pack[1]),
+            }
 
         return ret
 
