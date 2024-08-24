@@ -52,7 +52,9 @@ def train(args, net, segment, cluster, train_loader, optimizer_segment, writer, 
 
             # image and label and self supervised feature
             img = batch["img"].cuda()
-            label = batch["label"].cuda()
+
+            if not args.ignore_labels:
+                label = batch["label"].cuda()
 
             # intermediate features
             feat = net(img)[:, 1:, :]
@@ -84,12 +86,15 @@ def train(args, net, segment, cluster, train_loader, optimizer_segment, writer, 
             ######################################################################
 
             # linear probe loss
-            linear_logits = segment.linear(seg_feat_ema)
-            linear_logits = F.interpolate(linear_logits, label.shape[-2:], mode='bilinear', align_corners=False)
-            flat_linear_logits = linear_logits.permute(0, 2, 3, 1).reshape(-1, args.n_classes)
-            flat_label = label.reshape(-1)
-            flat_label_mask = (flat_label >= 0) & (flat_label < args.n_classes)
-            loss_linear = F.cross_entropy(flat_linear_logits[flat_label_mask], flat_label[flat_label_mask])
+            if not args.ignore_labels:
+                linear_logits = segment.linear(seg_feat_ema)
+                linear_logits = F.interpolate(linear_logits, label.shape[-2:], mode='bilinear', align_corners=False)
+                flat_linear_logits = linear_logits.permute(0, 2, 3, 1).reshape(-1, args.n_classes)
+                flat_label = label.reshape(-1)
+                flat_label_mask = (flat_label >= 0) & (flat_label < args.n_classes)
+                loss_linear = F.cross_entropy(flat_linear_logits[flat_label_mask], flat_label[flat_label_mask])
+            else:
+                loss_linear = 0.
 
             # loss
             loss = loss_front + loss_linear
@@ -103,6 +108,9 @@ def train(args, net, segment, cluster, train_loader, optimizer_segment, writer, 
         elif args.dataset=='cocostuff27':
             scaler.unscale_(optimizer_segment)
             torch.nn.utils.clip_grad_norm_(segment.parameters(), 2)
+        elif args.dataset=='roseaid':
+            scaler.unscale_(optimizer_segment)
+            torch.nn.utils.clip_grad_norm_(segment.parameters(), 1) # ??? TODO
         else:
             raise NotImplementedError
         scaler.step(optimizer_segment)
@@ -116,20 +124,26 @@ def train(args, net, segment, cluster, train_loader, optimizer_segment, writer, 
         cluster.bank_update(feat, proj_feat_ema)
 
         # linear probe acc check
-        pred_label = linear_logits.argmax(dim=1)
-        flat_pred_label = pred_label.view(-1)
-        acc = (flat_pred_label[flat_label_mask] == flat_label[flat_label_mask]).sum() / flat_label[
-            flat_label_mask].numel()
-        total_acc += acc.item()
+        if not args.ignore_labels:
+            pred_label = linear_logits.argmax(dim=1)
+            flat_pred_label = pred_label.view(-1)
+            acc = (flat_pred_label[flat_label_mask] == flat_label[flat_label_mask]).sum() / flat_label[
+                flat_label_mask].numel()
+            total_acc += acc.item()
 
         # loss check
         total_loss += loss.item()
         total_loss_front += loss_front.item()
-        total_loss_linear += loss_linear.item()
+        if not args.ignore_labels:
+            total_loss_linear += loss_linear.item()
 
         # real-time print
-        desc = f'[Train] Loss: {total_loss / (idx + 1):.2f}={total_loss_front / (idx + 1):.2f}+{total_loss_linear / (idx + 1):.2f}'
-        desc += f' ACC: {100. * total_acc / (idx + 1):.1f}%'
+        if not args.ignore_labels:
+            desc = f'[Train] Loss: {total_loss / (idx + 1):.2f}={total_loss_front / (idx + 1):.2f}+{total_loss_linear / (idx + 1):.2f}'
+            desc += f' ACC: {100. * total_acc / (idx + 1):.1f}%'
+        else:
+            desc = f'[Train] Loss: {total_loss / (idx + 1):.2f}={total_loss_front / (idx + 1):.2f}'
+
         prog_bar.set_description(desc, refresh=True)
 
 
@@ -154,7 +168,8 @@ def test(args, net, segment, nice, test_loader):
     for idx, batch in prog_bar:
         # image and label and self supervised feature
         img = batch["img"].cuda()
-        label = batch["label"].cuda()
+        if not args.ignore_labels:
+            label = batch["label"].cuda()
 
         # intermediate feature
         with autocast():
@@ -278,15 +293,15 @@ def main(rank, args, ngpus_per_node):
             optimizer_segment,
             writer, rank)
 
-
-        test(
-            epoch, # for decorator
-            rank, # for decorator
-            args,
-            net,
-            segment,
-            nice,
-            test_loader)
+        if not args.ignore_labels:
+            test(
+                epoch, # for decorator
+                rank, # for decorator
+                args,
+                net,
+                segment,
+                nice,
+                test_loader)
 
         if (rank == 0):
             x = segment.state_dict()
@@ -313,11 +328,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # model parameter
     parser.add_argument('--NAME-TAG', default='CAUSE-TR', type=str)
-    parser.add_argument('--data_dir', default='/mnt/hard2/lbk-iccv/datasets', type=str)
-    parser.add_argument('--dataset', default='cocostuff27', type=str)
-    parser.add_argument('--ckpt', default='checkpoint/dino_vit_base_8.pth', type=str)
+    parser.add_argument('--data_dir', default='/root/Causal-Unsupervised-Segmentation/dataset/', type=str)
+    parser.add_argument('--dataset', default='roseaid', type=str)
+
+    parser.add_argument('--ignore_labels', default=True)
+
+    parser.add_argument('--ckpt', default='/root/Causal-Unsupervised-Segmentation/checkpoint/dinov2_vit_small_14.pth', type=str)
     parser.add_argument('--epoch', default=2, type=int)
-    parser.add_argument('--distributed', default=True, type=str2bool)
+    parser.add_argument('--distributed', default=False, type=str2bool)
     parser.add_argument('--load_segment', default=False, type=str2bool)
     parser.add_argument('--load_cluster', default=False, type=str2bool)
     parser.add_argument('--train_resolution', default=320, type=int)
@@ -326,7 +344,8 @@ if __name__ == "__main__":
     parser.add_argument('--num_workers', default=int(os.cpu_count() / 8), type=int)
 
     # DDP
-    parser.add_argument('--gpu', default='0,1,2,3', type=str)
+    # parser.add_argument('--gpu', default='0,1,2,3', type=str)
+    parser.add_argument('--gpu', default='0', type=str)
     parser.add_argument('--port', default='12355', type=str)
     
     # codebook parameter

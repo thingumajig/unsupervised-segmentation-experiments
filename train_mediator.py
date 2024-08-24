@@ -133,11 +133,9 @@ if __name__ == "__main__":
     parser.add_argument('--num_workers', default=int(os.cpu_count() / 8), type=int)
 
     # dataset and baseline
-    parser.add_argument(
-        '--data_dir', default='/root/Causal-Unsupervised-Segmentation/dataset/', type=str)
+    parser.add_argument('--data_dir', default='/root/Causal-Unsupervised-Segmentation/dataset/', type=str)
     parser.add_argument('--dataset', default='roseaid', type=str)
-    parser.add_argument(
-        '--ckpt', default='/root/Causal-Unsupervised-Segmentation/checkpoint/dinov2_vit_small_14.pth', type=str)
+    parser.add_argument('--ckpt', default='/root/Causal-Unsupervised-Segmentation/checkpoint/dinov2_vit_small_14.pth', type=str)
 
     parser.add_argument('--ignore_labels', default=True)
 
